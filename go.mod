@@ -7,6 +7,8 @@ toolchain go1.24.2
 require (
 	github.com/ethereum/go-ethereum v1.16.2
 	github.com/go-chi/chi/v5 v5.2.2
+	github.com/golang-jwt/jwt/v4 v4.5.1
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/iden3/contracts-abi/state/go/abi v1.1.0
 	github.com/iden3/go-circuits/v2 v2.4.1

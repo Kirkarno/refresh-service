@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -18,11 +20,10 @@ var (
 	ErrCreateClaim        = errors.New("failed to create claim")
 )
 
-// IssuerService is service for communication with issuer node
 type IssuerService struct {
 	supportedIssuers map[string]string
 	issuerBasicAuth  map[string]string
-	do               http.Client
+	client           *http.Client
 }
 
 func NewIssuerService(
@@ -36,10 +37,11 @@ func NewIssuerService(
 	return &IssuerService{
 		supportedIssuers: supportedIssuers,
 		issuerBasicAuth:  issuerBasicAuth,
-		do:               *client,
+		client:           client,
 	}
 }
 
+// GetClaimByID получает VC по DID и claimID
 func (is *IssuerService) GetClaimByID(issuerDID, claimID string) (*verifiable.W3CCredential, error) {
 	issuerNode, err := is.getIssuerURL(issuerDID)
 	if err != nil {
@@ -47,127 +49,117 @@ func (is *IssuerService) GetClaimByID(issuerDID, claimID string) (*verifiable.W3
 	}
 	logger.DefaultLogger.Infof("use issuer node '%s' for issuer '%s'", issuerNode, issuerDID)
 
-	getRequest, err := http.NewRequest(
-		http.MethodGet,
-		fmt.Sprintf("%s/v2/identities/%s/credentials/%s", issuerNode, issuerDID, claimID),
-		http.NoBody,
-	)
+	url := fmt.Sprintf("%s/v2/identities/%s/credentials/%s", issuerNode, issuerDID, claimID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, errors.Wrapf(ErrGetClaim,
-			"failed to create http request: '%v'", err)
+		return nil, errors.Wrapf(ErrGetClaim, "failed to create http request: %v", err)
 	}
-	if err := is.setBasicAuth(issuerDID, getRequest); err != nil {
+
+	if err := is.setBasicAuth(issuerDID, req); err != nil {
 		return nil, err
 	}
 
-	resp, err := is.do.Do(getRequest)
+	resp, err := is.client.Do(req)
 	if err != nil {
-		return nil, errors.Wrapf(ErrGetClaim,
-			"failed http GET request: '%v'", err)
+		return nil, errors.Wrapf(ErrGetClaim, "failed http GET request: %v", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Wrapf(ErrGetClaim,
-			"invalid status code: '%d'", resp.StatusCode)
+		return nil, errors.Wrapf(ErrGetClaim, "invalid status code: %d", resp.StatusCode)
 	}
 
-	presentation := struct {
-		VC *verifiable.W3CCredential `json:"vc"`
-	}{}
-	err = json.NewDecoder(resp.Body).Decode(&presentation)
+	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return presentation.VC, errors.Wrapf(ErrGetClaim,
-			"failed to decode response: '%v'", err)
+		return nil, errors.Wrapf(ErrGetClaim, "failed to read response body: %v", err)
 	}
-	return presentation.VC, nil
+	log.Printf("📡 Raw response from issuer node (%s):\n%s", url, string(rawBody))
+
+	var response struct {
+		VC verifiable.W3CCredential `json:"vc"`
+	}
+	if err := json.Unmarshal(rawBody, &response); err != nil {
+		return nil, errors.Wrapf(ErrGetClaim, "failed to decode response: %v", err)
+	}
+
+	log.Printf("✅ Parsed VC: %+v\n", response.VC)
+	return &response.VC, nil
 }
 
-func (is *IssuerService) CreateCredential(issuerDID string, credentialRequest credentialRequest) (
-	id string,
-	err error,
-) {
+// CreateCredential создает VC
+func (is *IssuerService) CreateCredential(issuerDID string, credentialRequest credentialRequest) (string, error) {
 	issuerNode, err := is.getIssuerURL(issuerDID)
 	if err != nil {
-		return id, err
+		return "", err
 	}
 	logger.DefaultLogger.Infof("use issuer node '%s' for issuer '%s'", issuerNode, issuerDID)
 
-	body := bytes.NewBuffer([]byte{})
-	err = json.NewEncoder(body).Encode(credentialRequest)
+	body, err := json.Marshal(credentialRequest)
 	if err != nil {
-		return id, errors.Wrapf(ErrCreateClaim,
-			"credential request serialization error")
+		return "", errors.Wrap(ErrCreateClaim, "credential request serialization error")
 	}
 
-	postRequest, err := http.NewRequest(
-		http.MethodPost,
-		fmt.Sprintf("%s/v2/identities/%s/credentials", issuerNode, issuerDID),
-		body,
-	)
+	url := fmt.Sprintf("%s/v2/identities/%s/credentials", issuerNode, issuerDID)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
-		return id, errors.Wrapf(ErrCreateClaim,
-			"failed to create http request: '%v'", err)
-	}
-	if err := is.setBasicAuth(issuerDID, postRequest); err != nil {
-		return id, err
+		return "", errors.Wrapf(ErrCreateClaim, "failed to create http request: %v", err)
 	}
 
-	resp, err := is.do.Do(postRequest)
-	if err != nil {
-		return id, errors.Wrapf(ErrCreateClaim,
-			"failed http POST request: %v", err)
+	if err := is.setBasicAuth(issuerDID, req); err != nil {
+		return "", err
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+
+	resp, err := is.client.Do(req)
+	if err != nil {
+		return "", errors.Wrapf(ErrCreateClaim, "failed http POST request: %v", err)
+	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusCreated {
-		return id, errors.Wrap(ErrCreateClaim,
-			"invalid status code")
+		return "", errors.Wrap(ErrCreateClaim, "invalid status code")
 	}
-	responseBody := struct {
+
+	var responseBody struct {
 		ID string `json:"id"`
-	}{}
-	err = json.NewDecoder(resp.Body).Decode(&responseBody)
-	if err != nil {
-		return id, errors.Wrapf(ErrCreateClaim,
-			"failed to decode response: %v", err)
 	}
+	if err := json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
+		return "", errors.Wrapf(ErrCreateClaim, "failed to decode response: %v", err)
+	}
+
 	return responseBody.ID, nil
 }
 
+// getIssuerURL возвращает URL issuer’а, универсальный "*" используется по умолчанию
 func (is *IssuerService) getIssuerURL(issuerDID string) (string, error) {
-	url, ok := is.supportedIssuers[issuerDID]
-	if !ok {
-		url, ok = is.supportedIssuers["*"]
-		if !ok {
-			return "", errors.Wrapf(ErrIssuerNotSupported, "id '%s'", issuerDID)
-		}
+	if url, ok := is.supportedIssuers[issuerDID]; ok {
+		return url, nil
 	}
-	return url, nil
+	if url, ok := is.supportedIssuers["*"]; ok {
+		return url, nil
+	}
+	return "", errors.Wrapf(ErrIssuerNotSupported, "id '%s'", issuerDID)
 }
 
-func (is *IssuerService) setBasicAuth(issuerDID string, request *http.Request) error {
+// setBasicAuth устанавливает логин/пароль, универсальный "*" используется по умолчанию
+func (is *IssuerService) setBasicAuth(issuerDID string, req *http.Request) error {
 	if is.issuerBasicAuth == nil {
 		return nil
 	}
+
 	namepass, ok := is.issuerBasicAuth[issuerDID]
 	if !ok {
-		globalNamepass, ok := is.issuerBasicAuth["*"]
+		namepass, ok = is.issuerBasicAuth["*"]
 		if !ok {
 			logger.DefaultLogger.Warnf("issuer '%s' not found in basic auth map", issuerDID)
 			return nil
 		}
-		namepass = globalNamepass
 	}
 
-	namepassPair := strings.Split(namepass, ":")
-	if len(namepassPair) != 2 {
+	parts := strings.SplitN(namepass, ":", 2)
+	if len(parts) != 2 {
 		return errors.Errorf("invalid basic auth: %q", namepass)
 	}
 
-	request.SetBasicAuth(namepassPair[0], namepassPair[1])
+	req.SetBasicAuth(parts[0], parts[1])
 	return nil
 }
