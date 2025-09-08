@@ -4,7 +4,7 @@
   "typ": "application/iden3comm-plain-json",
   "type": "https://iden3-communication.io/credentials/1.0/refresh",
   "body": {
-    "id": "<488ca19e-88d7-11f0-adc2-0a58a9feac02>",
+    "id": "ee6f05a4-89b3-11f0-9e07-0a58a9feac02",
     "reason": "expired"
   },
   "from": "did:iden3:privado:main:2SkWHTrdcLsFABtDH5xBBDKrpeARMSBhJ2ZJcPouEV",
